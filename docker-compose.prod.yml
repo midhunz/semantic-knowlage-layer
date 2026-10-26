@@ -1,0 +1,92 @@
+# Production stack: Postgres + one-shot migration + app (API and UI) + TLS reverse proxy + scheduled backups.
+#   cp .env.example .env   # fill in the secrets
+#   docker compose -f docker-compose.prod.yml up -d --build
+name: semantic-layer
+
+x-app-env: &app-env
+  SL_ENV: production
+  SL_DATABASE_URL: postgresql://${POSTGRES_USER:-semantic}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-semantic_layer}
+  SL_LOG_JSON: "true"
+  SL_COOKIE_SECURE: ${SL_COOKIE_SECURE:-auto}
+  SL_BOOTSTRAP_ADMIN_EMAIL: ${SL_BOOTSTRAP_ADMIN_EMAIL:-}
+  SL_BOOTSTRAP_ADMIN_PASSWORD: ${SL_BOOTSTRAP_ADMIN_PASSWORD:-}
+  SL_CORS_ORIGINS: ${SL_CORS_ORIGINS:-}
+  WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+  SL_ENABLE_DOCS: ${SL_ENABLE_DOCS:-false}
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-semantic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-semantic_layer}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+    # intentionally no published port: only the other containers can reach the database
+
+  migrate:                       # runs to completion before the app starts; safe to re-run
+    build: .
+    image: semantic-layer:${SL_VERSION:-latest}
+    command: ["python", "-m", "app.cli", "migrate"]
+    environment: *app-env
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"
+
+  app:
+    build: .
+    image: semantic-layer:${SL_VERSION:-latest}
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      db: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    expose: ["8000"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  proxy:                         # TLS termination (automatic HTTPS when SL_DOMAIN is a real domain)
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      SL_DOMAIN: ${SL_DOMAIN:-localhost}
+    ports:
+      - "${SL_HTTP_PORT:-80}:80"
+      - "${SL_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app: { condition: service_healthy }
+
+  backup:                        # pg_dump every BACKUP_INTERVAL_HOURS, keeps BACKUP_KEEP_DAYS of history
+    image: postgres:16
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "/scripts/backup-loop.sh"]
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-semantic}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-semantic_layer}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./scripts/backup-loop.sh:/scripts/backup-loop.sh:ro
+      - ./backups:/backups
+    depends_on:
+      db: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
