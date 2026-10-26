@@ -1,0 +1,5 @@
+docker compose --env-file .env -f docker-compose.prod.yml stop app proxy
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"'
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < backups/semantic_layer-20261026-101156.sql
+docker compose --env-file .env -f docker-compose.prod.yml run --rm migrate
+docker compose --env-file .env -f docker-compose.prod.yml start app proxy
