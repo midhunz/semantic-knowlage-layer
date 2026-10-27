@@ -66,3 +66,11 @@ def make_user(client, role, email=None):
     other.events = client.events
     assert other.post("/api/auth/login", json={"email": email, "password": PW}).status_code == 200
     return other
+
+
+def go_live(c, kind, item_id):
+    """Submit a draft for review and approve it (what a steward and a reviewer do together)."""
+    assert c.post(f"/api/review/{kind}/{item_id}/submit").status_code == 200
+    r = c.post(f"/api/review/{kind}/{item_id}/approve")
+    assert r.status_code == 200, r.text
+    return r.json()

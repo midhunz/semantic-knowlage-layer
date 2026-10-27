@@ -276,6 +276,7 @@ const STATUS: Record<string, { icon: LucideIcon; cls: string }> = {
   published: { icon: CheckCircle2, cls: "ok" },
   reviewed: { icon: CheckCheck, cls: "info" },
   draft: { icon: CircleDashed, cls: "" },
+  review: { icon: CheckCheck, cls: "info" },
 };
 export function StatusChip({ status }: { status: string }) {
   const m = STATUS[status] ?? STATUS.draft;

@@ -160,7 +160,7 @@ def glossary_resolve(session: Session, text: str) -> list[GlossaryTerm]:
     """Match a term or synonym in either language, ignoring Arabic diacritics/letter variants."""
     n = i18n.norm(text)
     out = []
-    for t in session.scalars(select(GlossaryTerm)):
+    for t in session.scalars(select(GlossaryTerm).where(GlossaryTerm.status == "published")):
         names = [t.term, t.term_ar, *(t.synonyms or []), *(t.synonyms_ar or [])]
         if n in {i18n.norm(x) for x in names if x}:
             out.append(t)

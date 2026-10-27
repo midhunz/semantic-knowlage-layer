@@ -13,7 +13,7 @@ from app.connectors import get_connector
 from app.db import get_session
 from app.models import Column, Dimension, DimensionBinding, DimensionValue, Table, _now
 from app.services import dimensions as dims
-from app.services import export, revisions, webhooks
+from app.services import export, revisions, review, webhooks
 from app.services.settings_store import get_settings
 
 router = APIRouter(prefix="/api/dimensions", tags=["dimensions"], dependencies=[Depends(catalog_access)])
@@ -56,7 +56,6 @@ class DimensionPatch(BaseModel):
     applies_to: list[Condition] | None = None
     applies_note: str | None = None
     applies_note_ar: str | None = None
-    status: str | None = Field(default=None, pattern="^(draft|published)$")
 
 
 class ValueIn(BaseModel):
@@ -93,6 +92,13 @@ def _dim(session: Session, dim_id: int) -> Dimension:
     return d
 
 
+def _dim_edit(session: Session, dim_id: int) -> Dimension:
+    """A dimension about to change: live ones are read-only (see review.for_edit), one in review goes back to draft."""
+    d = _dim(session, dim_id)
+    review.for_edit(d)
+    return d
+
+
 def _value(dim: Dimension, value_id: int) -> DimensionValue:
     v = next((x for x in dim.values if x.id == value_id), None)
     if v is None:
@@ -105,14 +111,12 @@ def _blank(v):
 
 
 def _audit(session: Session, dim: Dimension, field: str, old, new, actor: str) -> None:
-    revisions.audit(session, "dimension", dim, field, old, new, actor)
+    revisions.audit(session, "dimension", review.live_of(session, dim) or dim, field, old, new, actor)
 
 
 def _touch(session: Session, dim: Dimension, what: str) -> None:
-    """Dimension edits are live, so tell downstream apps when a published one changes."""
+    """Edits only ever land on drafts; downstream apps hear about it when a reviewer approves (services/review.py)."""
     dim.updated_at = _now()
-    if dim.status == "published":
-        webhooks.emit(session, "dimension.updated", {"key": dim.key, "change": what})
 
 
 def _fail_on_errors(session: Session, dim: Dimension) -> None:
@@ -137,7 +141,10 @@ def _binding_out(b: DimensionBinding) -> dict:
 
 def _summary(session: Session, d: Dimension) -> dict:
     issues = dims.check(session, d)
+    copy = None if d.draft_of_id else review.draft_of(session, d)
     return {"id": d.id, "key": d.key, "label": d.label, "label_ar": d.label_ar, "status": d.status,
+            "draft_of_id": d.draft_of_id, "draft_id": copy.id if copy else None, "draft_status": copy.status if copy else None,
+            "review_note": d.review_note, "submitted_by": d.submitted_by,
             "values": len(d.values), "bindings": len(d.bindings), "families": len(d.families or []),
             "applies": bool(d.applies_to), "errors": len(dims.errors(issues)),
             "warnings": len(issues) - len(dims.errors(issues)), "updated_at": d.updated_at}
@@ -156,7 +163,7 @@ def _detail(session: Session, d: Dimension) -> dict:
 @router.get("")
 def list_dimensions(q: str | None = None, status: str | None = None, session: Session = Db):
     out = []
-    for d in session.scalars(select(Dimension).order_by(Dimension.key)):
+    for d in session.scalars(select(Dimension).where(Dimension.draft_of_id.is_(None)).order_by(Dimension.key)):
         if status and d.status != status:
             continue
         if q and not i18n.hit(q, d.key, d.label, d.label_ar, d.synonyms or [], d.synonyms_ar or [],
@@ -168,7 +175,7 @@ def list_dimensions(q: str | None = None, status: str | None = None, session: Se
 
 @router.post("")
 def create_dimension(body: DimensionIn, request: Request, session: Session = Db):
-    if session.scalar(select(Dimension).where(Dimension.key == body.key)):
+    if session.scalar(select(Dimension).where(Dimension.key == body.key, Dimension.draft_of_id.is_(None))):
         raise HTTPException(409, f"A dimension with the key “{body.key}” already exists")
     d = Dimension(key=body.key, label=_blank(body.label), label_ar=_blank(body.label_ar),
                   description=_blank(body.description), description_ar=_blank(body.description_ar),
@@ -180,13 +187,20 @@ def create_dimension(body: DimensionIn, request: Request, session: Session = Db)
     return _detail(session, d)
 
 
+def _taken(session: Session) -> dict[int, str]:
+    """column id → key of the live dimension it is bound to (draft copies repeat their live dimension's bindings)."""
+    return {b.column_id: b.dimension.key for b in session.scalars(
+        select(DimensionBinding).join(Dimension, Dimension.id == DimensionBinding.dimension_id)
+        .where(Dimension.draft_of_id.is_(None)))}
+
+
 @router.get("/columns")
 def search_columns(q: str = "", dimension_id: int | None = None, limit: int = Query(40, ge=1, le=200),
                    session: Session = Db):
     """Columns that could be bound to a dimension (for the "bind columns" picker)."""
     stmt = (select(Column, Table).join(Table, Table.id == Column.table_id)
             .where(Column.removed.is_(False), Table.removed.is_(False)).order_by(Column.name, Table.name))
-    bound = {b.column_id: b.dimension.key for b in session.scalars(select(DimensionBinding))}
+    bound = _taken(session)
     out = []
     for c, t in session.execute(stmt):
         if q and not i18n.hit(q, c.name, t.name, t.schema_name, t.source.name):
@@ -205,10 +219,9 @@ def get_dimension(dim_id: int, session: Session = Db):
 
 @router.patch("/{dim_id}")
 def update_dimension(dim_id: int, body: DimensionPatch, request: Request, session: Session = Db):
-    d = _dim(session, dim_id)
+    d = _dim_edit(session, dim_id)
     actor = actor_of(request)
     data = body.model_dump(exclude_unset=True)
-    status = data.pop("status", None)
     changed = []
     for field, new in data.items():
         if field in ("synonyms", "synonyms_ar"):
@@ -227,14 +240,6 @@ def update_dimension(dim_id: int, body: DimensionPatch, request: Request, sessio
             changed.append(field)
     if changed:
         _fail_on_errors(session, d)
-    if status and status != d.status:
-        if status == "published":
-            errs = dims.errors(dims.check(session, d))
-            if errs:
-                raise HTTPException(422, "Cannot publish: " + "; ".join(e["message"] for e in errs))
-        _audit(session, d, "status", d.status, status, actor)
-        d.status = status
-        changed.append("status")
     if changed:
         _touch(session, d, ", ".join(changed))
     session.commit()
@@ -244,13 +249,18 @@ def update_dimension(dim_id: int, body: DimensionPatch, request: Request, sessio
 @router.delete("/{dim_id}")
 def delete_dimension(dim_id: int, request: Request, session: Session = Db):
     d = _dim(session, dim_id)
-    users = [o.key for o in session.scalars(select(Dimension)) if o.id != d.id
+    users = [o.key for o in session.scalars(select(Dimension).where(Dimension.draft_of_id.is_(None))) if o.id != d.id
              and any(c.get("dimension") == d.key for c in o.applies_to or [])]
     if users:
         raise HTTPException(409, f"Other dimensions restrict themselves by {d.key}: {', '.join(users)}. Change those first.")
+    if d.draft_of_id:                  # discarding a draft copy: the live dimension is untouched
+        review.discard(session, d, actor_of(request))
+        session.commit()
+        return {"deleted": dim_id}
     _audit(session, d, "deleted", d.key, None, actor_of(request))
     if d.status == "published":
         webhooks.emit(session, "dimension.updated", {"key": d.key, "change": "deleted"})
+    review.delete_copies(session, d)
     session.delete(d)
     session.commit()
     return {"deleted": dim_id}
@@ -269,7 +279,7 @@ def _add_value(session: Session, d: Dimension, body: ValueIn) -> DimensionValue 
 
 @router.post("/{dim_id}/values")
 def add_value(dim_id: int, body: ValueIn, request: Request, session: Session = Db):
-    d = _dim(session, dim_id)
+    d = _dim_edit(session, dim_id)
     if not body.value.strip():
         raise HTTPException(422, "A value is required")
     v = _add_value(session, d, body)
@@ -284,7 +294,7 @@ def add_value(dim_id: int, body: ValueIn, request: Request, session: Session = D
 
 @router.post("/{dim_id}/values/bulk")
 def add_values(dim_id: int, body: BulkValues, request: Request, session: Session = Db):
-    d = _dim(session, dim_id)
+    d = _dim_edit(session, dim_id)
     added = [v for v in (_add_value(session, d, b) for b in body.values) if v]
     session.flush()
     if added:
@@ -296,7 +306,7 @@ def add_values(dim_id: int, body: BulkValues, request: Request, session: Session
 
 @router.patch("/{dim_id}/values/{value_id}")
 def update_value(dim_id: int, value_id: int, body: ValuePatch, request: Request, session: Session = Db):
-    d = _dim(session, dim_id)
+    d = _dim_edit(session, dim_id)
     v = _value(d, value_id)
     actor = actor_of(request)
     for field, new in body.model_dump(exclude_unset=True).items():
@@ -320,7 +330,7 @@ def value_dependents(dim_id: int, value_id: int, session: Session = Db):
 
 @router.delete("/{dim_id}/values/{value_id}")
 def delete_value(dim_id: int, value_id: int, request: Request, confirm: bool = False, session: Session = Db):
-    d = _dim(session, dim_id)
+    d = _dim_edit(session, dim_id)
     v = _value(d, value_id)
     dep = dims.value_dependents(session, d, v.value)
     if dep["applies_to"]:      # these change reported numbers, so they must be edited deliberately first
@@ -350,17 +360,18 @@ def delete_value(dim_id: int, value_id: int, request: Request, confirm: bool = F
 # --------------------------------------------------------------------------- bindings
 @router.post("/{dim_id}/bindings")
 def bind_columns(dim_id: int, body: BindBody, request: Request, session: Session = Db):
-    d = _dim(session, dim_id)
+    d = _dim_edit(session, dim_id)
     actor = actor_of(request)
-    existing = {b.column_id: b.dimension.key for b in session.scalars(select(DimensionBinding))}
+    existing = _taken(session)
+    mine = {b.column_id for b in d.bindings}
     added = 0
     for cid in dict.fromkeys(body.column_ids):
         col = session.get(Column, cid)
         if col is None:
             raise HTTPException(404, f"Column {cid} not found")
-        if existing.get(cid) == d.key:
+        if cid in mine:
             continue
-        if cid in existing:
+        if existing.get(cid, d.key) != d.key:
             raise HTTPException(409, f"{col.table.full_name}.{col.name} already belongs to the dimension “{existing[cid]}”")
         d.bindings.append(DimensionBinding(column_id=cid))
         _audit(session, d, "bound column", None, f"{col.table.full_name}.{col.name}", actor)
@@ -373,7 +384,7 @@ def bind_columns(dim_id: int, body: BindBody, request: Request, session: Session
 
 @router.delete("/{dim_id}/bindings/{column_id}")
 def unbind_column(dim_id: int, column_id: int, request: Request, session: Session = Db):
-    d = _dim(session, dim_id)
+    d = _dim_edit(session, dim_id)
     b = next((x for x in d.bindings if x.column_id == column_id), None)
     if b is None:
         raise HTTPException(404, "That column is not bound to this dimension")

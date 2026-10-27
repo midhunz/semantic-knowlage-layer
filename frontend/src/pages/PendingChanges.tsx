@@ -7,6 +7,7 @@ import { useAuth } from "../auth";
 import { PublishDialog } from "../revisions";
 import { EmptyState, Modal, Pager, SearchInput, SkeletonRows, ago, useDebounced, useTitle, useToast, InfoTip } from "../ui";
 import { HELP } from "../help";
+import { ReviewQueue } from "../review";
 
 const PAGE = 50;
 
@@ -45,6 +46,7 @@ export default function PendingChanges() {
       <div className="page-head">
         <div><div className="d-kind"><GitPullRequestDraft className="ic" />Staged edits</div><div className="d-title">Pending changes <InfoTip help={HELP.changes} /></div></div>
       </div>
+      <ReviewQueue />
       <div className="toolbar">
         <SearchInput shortcut value={q} onChange={(v) => { setQ(v); setPage(1); }} placeholder="Find a table…" label="Find a table with pending changes" />
         <span className="muted">{data ? `${data.total.toLocaleString()} table${data.total === 1 ? "" : "s"} with pending changes` : ""}</span>

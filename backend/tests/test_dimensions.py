@@ -1,7 +1,7 @@
 """Dimensions: vocabulary, aliases, families, "applies to", bindings, loading values, agent lookup."""
 
 import pytest
-from conftest import make_user
+from conftest import go_live, make_user
 from test_quarantine import T, first_sync
 
 import app.mcp_server as mcp_server
@@ -32,7 +32,7 @@ def create_person_category(c, publish=True, bind=()):
     if bind:
         assert c.post(f"/api/dimensions/{did}/bindings", json={"column_ids": list(bind)}).status_code == 200
     if publish:
-        assert c.patch(f"/api/dimensions/{did}", json={"status": "published"}).status_code == 200
+        go_live(c, "dimension", did)
     return did
 
 
@@ -121,12 +121,13 @@ def test_value_crud_the_stored_value_is_immutable(api):
 
 def test_ambiguous_words_are_warned_about_and_flagged_when_resolving(api):
     c, _ = api
-    did = create_person_category(c)
+    did = create_person_category(c, publish=False)
     vid = {v["value"]: v["id"] for v in c.get(f"/api/dimensions/{did}").json()["values_list"]}
     c.patch(f"/api/dimensions/{did}/values/{vid['GCC']}", json={"aliases": ["resident", "gulf nationals"]})
     issues = c.get(f"/api/dimensions/{did}/validation").json()["issues"]
     amb = [i for i in issues if i["code"] == "ambiguous_word"]
     assert len(amb) == 1 and amb[0]["severity"] == "warning" and amb[0]["values"] == ["EXPAT", "GCC"]
+    go_live(c, "dimension", did)                                                      # warnings do not block review
     r = resolve(c, "resident")
     assert values_of(r) == ["EXPAT", "GCC"] and r["ambiguous"] is True
     assert c.get("/api/dimensions").json()[0]["warnings"] >= 1
@@ -135,7 +136,7 @@ def test_ambiguous_words_are_warned_about_and_flagged_when_resolving(api):
 # ----------------------------------------------------------------------------- families
 def test_families_must_point_at_listed_values(api):
     c, _ = api
-    did = create_person_category(c)
+    did = create_person_category(c, publish=False)
     ok = c.patch(f"/api/dimensions/{did}", json={"families": [{"term": "gulf residents", "term_ar": "مقيمو الخليج",
                                                                "values": ["GCC", "EXPAT"]}]})
     assert ok.status_code == 200
@@ -147,6 +148,7 @@ def test_families_must_point_at_listed_values(api):
     assert bad.status_code == 422 and "twice" in bad.json()["detail"]
     assert len(c.get(f"/api/dimensions/{did}").json()["families"]) == 1               # failed saves changed nothing
 
+    go_live(c, "dimension", did)
     r = resolve(c, "gulf residents")                                                  # one word, several values
     assert values_of(r) == ["EXPAT", "GCC"] and not r["ambiguous"] and r["matches"][0]["via"] == "family"
     assert values_of(resolve(c, "مقيمو الخليج")) == ["EXPAT", "GCC"]
@@ -154,7 +156,7 @@ def test_families_must_point_at_listed_values(api):
 
 def test_removing_a_value_warns_about_dependents_and_protects_applies_to_rules(api):
     c, _ = api
-    did = create_person_category(c)
+    did = create_person_category(c, publish=False)
     vid = {v["value"]: v["id"] for v in c.get(f"/api/dimensions/{did}").json()["values_list"]}
     c.patch(f"/api/dimensions/{did}", json={"families": [{"term": "gulf residents", "values": ["GCC", "EXPAT"]}]})
     dep = c.get(f"/api/dimensions/{did}/values/{vid['GCC']}/dependents").json()
@@ -189,7 +191,8 @@ def test_applies_to_is_a_validated_structured_rule_exported_as_an_instruction(ap
 
     c.patch(f"/api/dimensions/{tribe}", json={"applies_to": [{"dimension": "person_category", "values": ["CITIZEN"]}],
                                               "applies_note": "Tribes only exist for citizens.",
-                                              "applies_note_ar": "القبائل للمواطنين فقط.", "status": "published"})
+                                              "applies_note_ar": "القبائل للمواطنين فقط."})
+    go_live(c, "dimension", tribe)
     doc = c.get("/agent/dimensions/tribe", params={"lang": "en"}).json()["applies_to"]
     assert doc["everyone"] is False and doc["conditions"] == [{"dimension": "person_category", "values": ["CITIZEN"]}]
     assert "restrict the data to person_category = CITIZEN" in doc["instruction"] and "Measure shares" in doc["instruction"]
@@ -236,7 +239,7 @@ def test_binding_columns_visibility_and_the_agent_export(api):
     found = c.get("/api/dimensions/columns", params={"q": "person_category"}).json()
     assert {f["table"]: f["bound_to"] for f in found} == {"wh.sales.population": "person_category", "wh.sales.nationality": "person_category"}
 
-    c.patch(f"/api/dimensions/{did}", json={"status": "published"})
+    go_live(c, "dimension", did)
     assert [d["key"] for d in c.get("/agent/dimensions").json()] == ["person_category"]
     d = c.get("/agent/dimensions/person_category").json()
     assert d["columns"] == ["wh.sales.population.person_category", "wh.sales.nationality.person_category"]
@@ -249,8 +252,12 @@ def test_binding_columns_visibility_and_the_agent_export(api):
     assert c.get("/agent/dimensions/person_category").json()["columns"] == ["wh.sales.population.person_category"]
     c.patch(f"/api/tables/{tables['population']}", json={"status": "draft"})
     assert c.get("/agent/dimensions/person_category").json()["columns"] == []
-    assert c.delete(f"/api/dimensions/{did}/bindings/{cols[('population', 'person_category')]}").status_code == 200
-    assert c.delete(f"/api/dimensions/{did}/bindings/{cols[('population', 'person_category')]}").status_code == 404
+    pop = cols[('population', 'person_category')]
+    assert c.delete(f"/api/dimensions/{did}/bindings/{pop}").status_code == 409                 # live: change a draft instead
+    draft = c.post(f"/api/review/dimension/{did}/edit-draft").json()["id"]
+    assert c.delete(f"/api/dimensions/{draft}/bindings/{pop}").status_code == 200
+    assert c.delete(f"/api/dimensions/{draft}/bindings/{pop}").status_code == 404
+    assert len(c.get(f"/api/dimensions/{did}").json()["bindings_list"]) == 2                    # the live one is untouched
 
 
 def test_languages_in_the_dimension_export(api):
@@ -278,8 +285,9 @@ def test_languages_in_the_dimension_export(api):
 def test_a_tables_context_names_its_dimensions_and_caps_long_lists(api):
     c, Local = api
     tables, cols = lake(Local, c)
-    did = create_person_category(c, bind=[cols[("population", "person_category")]])
+    did = create_person_category(c, publish=False, bind=[cols[("population", "person_category")]])
     c.patch(f"/api/dimensions/{did}", json={"applies_to": [{"dimension": "person_category", "values": ["CITIZEN", "EXPAT"]}]})
+    go_live(c, "dimension", did)
     text = c.get("/agent/tables/wh.sales.population/context").text
     assert "dimension: person_category" in text                                       # on the column
     assert "dimensions:" in text and "value: CITIZEN" in text and "label: Citizen" in text
@@ -289,12 +297,14 @@ def test_a_tables_context_names_its_dimensions_and_caps_long_lists(api):
     assert "label: مواطن" in ar
     assert "dimensions:" not in c.get("/agent/tables/wh.sales.nationality/context").text   # not bound: nothing added
 
-    c.post(f"/api/dimensions/{did}/values/bulk", json={"values": [{"value": f"V{i}"} for i in range(40)]})
+    draft = c.post(f"/api/review/dimension/{did}/edit-draft").json()["id"]
+    c.post(f"/api/dimensions/{draft}/values/bulk", json={"values": [{"value": f"V{i}"} for i in range(40)]})
+    go_live(c, "dimension", draft)
     ctx = c.get("/agent/tables/wh.sales.population/context", params={"format": "json"}).text
     import json as _json
     block = _json.loads(ctx)[0]["dimensions"][0]
     assert len(block["values"]) == 30 and block["values_total"] == 44 and "resolve_value" in block["note"]
-    c.patch(f"/api/dimensions/{did}", json={"status": "draft"})
+    assert c.post(f"/api/review/dimension/{did}/unpublish").status_code == 200
     assert "dimensions:" not in c.get("/agent/tables/wh.sales.population/context").text    # unpublished: not exposed
 
 
@@ -338,7 +348,7 @@ def test_loading_values_from_the_data(api, monkeypatch):
     c, Local = api
     tables, cols = lake(Local, c)
     pop, nat = cols[("population", "person_category")], cols[("nationality", "person_category")]
-    did = create_person_category(c, bind=[pop, nat])
+    did = create_person_category(c, publish=False, bind=[pop, nat])
     import app.dimensions_api as api_mod
     monkeypatch.setattr(api_mod, "get_connector", lambda kind, config: FakeLake(config))
     FakeLake.boom = False
@@ -391,21 +401,25 @@ def test_permissions_events_audit_and_publishing_guard(api):
     assert steward.post(f"/api/dimensions/{did}/values", json={"value": "NEW"}).status_code == 200
     assert not [e for e in c.events if e[0] == "dimension.updated"]                       # a draft is nobody's business
 
-    steward.patch(f"/api/dimensions/{did}", json={"status": "published"})
-    steward.post(f"/api/dimensions/{did}/values", json={"value": "OTHER", "aliases": ["misc"]})
+    go_live(steward, "dimension", did)
+    assert steward.post(f"/api/dimensions/{did}/values", json={"value": "OTHER"}).status_code == 409   # live: edit a draft
+    draft = steward.post(f"/api/review/dimension/{did}/edit-draft").json()["id"]
+    steward.post(f"/api/dimensions/{draft}/values", json={"value": "OTHER", "aliases": ["misc"]})
+    assert [e for e in c.events if e[0] == "dimension.updated"] == [("dimension.updated", {"key": "person_category", "change": "published"})]
+    go_live(steward, "dimension", draft)
     events = [e for e in c.events if e[0] == "dimension.updated"]
-    assert events[-1][1] == {"key": "person_category", "change": "added value OTHER"}
+    assert events[-1][1] == {"key": "person_category", "change": "updated"}
 
     log = c.get("/api/admin/audit", params={"actor": "s@example.com"}).json()["items"]
     assert any(a["target"] == "dimension person_category" and a["field"] == "value OTHER" for a in log)
     assert any(a["field"] == "status" and a["new"] == "published" for a in log)
 
-    with Local() as s:                                                                    # an invalid state cannot be published
+    with Local() as s:                                                                    # an invalid state cannot go to review
         d = s.query(Dimension).one()
         d.status, d.families = "draft", [{"term": "bad", "values": ["GCC", "NOPE"]}]
         s.commit()
-    r = steward.patch(f"/api/dimensions/{did}", json={"status": "published"})
-    assert r.status_code == 422 and "Cannot publish" in r.json()["detail"] and "NOPE" in r.json()["detail"]
+    r = steward.post(f"/api/review/dimension/{did}/submit")
+    assert r.status_code == 422 and "Cannot submit" in r.json()["detail"] and "NOPE" in r.json()["detail"]
     assert c.get("/api/dimensions").json()[0]["errors"] == 1
 
 

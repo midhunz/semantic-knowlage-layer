@@ -81,7 +81,7 @@ class MetricIn(BaseModel):
     allowed_dimensions: list[str] = []
     synonyms: list[str] = []
     owner: str | None = None
-    status: Status = "draft"
+    status: Status | None = None          # ignored: status only changes through the review flow
 
 
 class GlossaryIn(BaseModel):

@@ -5,15 +5,15 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app import admin as admin_api
-from app import catalog, dimensions_api, i18n, revisions_api, schemas
+from app import catalog, dimensions_api, i18n, review_api, revisions_api, schemas
 from app.auth import Principal, actor_of, agent_access, catalog_access
 from app.auth import router as auth_router
 from app.connectors import get_connector
 from app.config import settings
 from app.db import get_session
-from app.models import (AuditLog, Column, DimensionBinding, GlossaryTerm, Metric, Profile, Relationship, SampleQuery,
+from app.models import (AuditLog, Column, Dimension, DimensionBinding, GlossaryTerm, Metric, Profile, Relationship, SampleQuery,
                         SchemaMeta, Source, Table)
-from app.services import export, revisions, webhooks
+from app.services import export, review, revisions, webhooks
 from app.services.settings_store import get_settings
 from app.services.sync import apply_sync, completeness, load_source
 from app.web import install, lifespan, serve_ui
@@ -186,7 +186,8 @@ def get_table(table_id: int, session: Session = Db):
     pend = revisions.pending_of(session, t)
     state = revisions.merged_state(t, pend)
     bound = {b.column_id: b.dimension for b in session.scalars(
-        select(DimensionBinding).where(DimensionBinding.column_id.in_([c.id for c in t.columns] or [-1])))}
+        select(DimensionBinding).join(Dimension, Dimension.id == DimensionBinding.dimension_id)
+        .where(DimensionBinding.column_id.in_([c.id for c in t.columns] or [-1]), Dimension.draft_of_id.is_(None)))}
     staged_cols = (pend.changes.get("columns", {}) if pend else {})
     cols = []
     for c in t.columns:
@@ -246,35 +247,64 @@ def create_relationship(body: schemas.RelationshipIn, session: Session = Db):
     return {"id": r.id}
 
 
-def _crud(path: str, model, schema_in):
+def _row(o) -> dict:
+    return {k: getattr(o, k) for k in o.__table__.columns.keys()}
+
+
+def _crud(path: str, model, schema_in, name_field: str | None = None):
+    """CRUD for one kind of content. Giving `name_field` puts it under review (draft → review → published, see
+    services/review.py): new rows are drafts, a live row cannot be edited in place, a draft copy shows as `draft_id`."""
+    reviewed = name_field is not None
+
     @admin.post(f"/{path}", name=f"create_{path}")
     def create(body: schema_in, session: Session = Db):  # type: ignore[valid-type]
-        obj = model(**body.model_dump())
+        data = body.model_dump()
+        if reviewed:
+            data.pop("status", None)
+            if session.scalar(select(model).where(getattr(model, name_field) == data[name_field], model.draft_of_id.is_(None))):
+                raise HTTPException(409, f"“{data[name_field]}” already exists")
+        obj = model(**data)
         session.add(obj)
         session.commit()
-        return {k: getattr(obj, k) for k in obj.__table__.columns.keys()}
+        return _row(obj)
 
     @admin.get(f"/{path}", name=f"list_{path}")
     def list_(session: Session = Db):
-        return [{k: getattr(o, k) for k in o.__table__.columns.keys()} for o in session.scalars(select(model))]
+        if not reviewed:
+            return [_row(o) for o in session.scalars(select(model))]
+        copies = {c.draft_of_id: c for c in session.scalars(select(model).where(model.draft_of_id.is_not(None)))}
+        return [{**_row(o), "draft_id": copies[o.id].id if o.id in copies else None,
+                 "draft_status": copies[o.id].status if o.id in copies else None}
+                for o in session.scalars(select(model).where(model.draft_of_id.is_(None)))]
+
+    @admin.get(f"/{path}/{{item_id}}", name=f"get_{path}")
+    def get_one(item_id: int, session: Session = Db):
+        return _row(_get(session, model, item_id))
 
     @admin.put(f"/{path}/{{item_id}}", name=f"update_{path}")
     def update(item_id: int, body: schema_in, session: Session = Db):  # type: ignore[valid-type]
         obj = _get(session, model, item_id)
-        for k, v in body.model_dump().items():
+        data = body.model_dump()
+        if reviewed:
+            data.pop("status", None)
+            review.for_edit(obj)
+        for k, v in data.items():
             setattr(obj, k, v)
         session.commit()
-        return {k: getattr(obj, k) for k in obj.__table__.columns.keys()}
+        return _row(obj)
 
     @admin.delete(f"/{path}/{{item_id}}", name=f"delete_{path}")
     def delete(item_id: int, session: Session = Db):
-        session.delete(_get(session, model, item_id))
+        obj = _get(session, model, item_id)
+        if reviewed:
+            review.delete_copies(session, obj)
+        session.delete(obj)
         session.commit()
         return {"deleted": item_id}
 
 
-_crud("metrics", Metric, schemas.MetricIn)
-_crud("glossary", GlossaryTerm, schemas.GlossaryIn)
+_crud("metrics", Metric, schemas.MetricIn, "name")
+_crud("glossary", GlossaryTerm, schemas.GlossaryIn, "term")
 _crud("sample-queries", SampleQuery, schemas.SampleQueryIn)
 
 
@@ -409,6 +439,7 @@ app.include_router(auth_router)
 app.include_router(admin_api.router)
 app.include_router(admin)
 app.include_router(revisions_api.router)
+app.include_router(review_api.router)
 app.include_router(dimensions_api.router)
 app.include_router(dimensions_api.agent_router)
 app.include_router(catalog.router, dependencies=[Depends(catalog_access)])

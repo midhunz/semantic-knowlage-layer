@@ -22,6 +22,8 @@ EVENTS = {
     "table.unpublished": "A table was withdrawn from agents",
     "table.updated": "A new version of a published table went live",
     "dimension.updated": "A published dimension (its values, aliases or rules) changed",
+    "metric.updated": "A published metric was approved or changed",
+    "glossary.updated": "A published glossary term was approved or changed",
     "catalog.synced": "A source finished syncing",
     "webhook.test": "Sent when you press “Send test”",
 }

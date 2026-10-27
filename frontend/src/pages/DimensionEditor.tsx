@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { AlertTriangle, ArrowLeft, Check, DatabaseZap, EyeOff, FileText, GitMerge, Info, Link2, ListPlus, Plus, Send, Shapes, ShieldAlert, Trash2, Unlink, Users, XCircle } from "lucide-react";
 import { api, errText, send } from "../api";
 import { useAuth } from "../auth";
+import { ReviewBar } from "../review";
 import { Bi, EmptyState, Modal, SearchInput, StatusChip, Tags, Text, ValueChips, csv, hasArabic, useTitle, useToast } from "../ui";
 
 const TABS = [["meaning", "Meaning", FileText], ["values", "Values", ListPlus], ["families", "Families", GitMerge], ["applies", "Applies to", Users], ["used", "Used in", Link2]] as const;
@@ -350,7 +351,7 @@ export default function DimensionEditor() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const toast = useToast();
-  const { canEdit } = useAuth();
+  const { canEdit: mayEdit } = useAuth();
   const [sp, setSp] = useSearchParams();
   const tab = (TABS.find((t) => t[0] === sp.get("tab"))?.[0] ?? "meaning") as Tab;
   const { data: d, isLoading, patch, done } = useDimension(id);
@@ -364,6 +365,7 @@ export default function DimensionEditor() {
   if (isLoading) return <div className="loading">Loading dimension…</div>;
   if (!d) return <div className="loading">Dimension not found.</div>;
   const p = (body: object) => patch.mutate(body);
+  const canEdit = mayEdit && d.status !== "published";          // a live dimension is read-only: edit its draft copy
 
   return (
     <div>
@@ -376,15 +378,13 @@ export default function DimensionEditor() {
               <div className="d-title">{d.label || d.key}{d.label_ar && <span className="ar-text" dir="rtl" style={{ marginLeft: 14, fontWeight: 500 }}>{d.label_ar}</span>}</div>
               <div className="d-name">{d.key}</div>
             </div>
-            {canEdit && (
+            {mayEdit && (
               <div className="d-actions">
                 <button className="btn danger" onClick={() => window.confirm(`Delete the dimension “${d.key}”, its ${d.values_list.length} values and its links? Columns and data are not touched.`) && del.mutate()}><Trash2 className="ic" />Delete</button>
-                {d.status !== "published"
-                  ? <button className="btn primary" onClick={() => p({ status: "published" })}><Send className="ic" />Publish to agents</button>
-                  : <button className="btn" onClick={() => p({ status: "draft" })}><EyeOff className="ic" />Unpublish</button>}
               </div>
             )}
           </div>
+          <ReviewBar kind="dimension" item={d} name={d.label || d.key} onOpen={(i) => nav(`/dimensions/${i}`)} onGone={() => nav(d.draft_of_id ? `/dimensions/${d.draft_of_id}` : "/dimensions")} />
           <div className="chips" style={{ alignItems: "center" }}>
             <StatusChip status={d.status} />
             <span className="chip">{d.values_list.length} values</span>

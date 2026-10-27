@@ -157,9 +157,11 @@ class Relationship(Base):
 
 class Metric(Base):
     __tablename__ = "metric"
+    __table_args__ = (Index("uq_metric_name_live", "name", unique=True,
+                            postgresql_where=text("draft_of_id IS NULL"), sqlite_where=text("draft_of_id IS NULL")),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(200), unique=True)
+    name: Mapped[str] = mapped_column(String(200))
     name_ar: Mapped[str | None] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(Text)
     description_ar: Mapped[str | None] = mapped_column(Text)
@@ -170,14 +172,21 @@ class Metric(Base):
     synonyms: Mapped[list] = mapped_column(JSON, default=list)
     synonyms_ar: Mapped[list] = mapped_column(JSON, default=list)
     owner: Mapped[str | None] = mapped_column(String(200))
-    status: Mapped[str] = mapped_column(String(20), default="draft")
+    status: Mapped[str] = mapped_column(String(20), default="draft")      # draft | review | published
+    # review flow: a copy (draft_of_id set) holds edits to a published item until a reviewer approves them
+    draft_of_id: Mapped[int | None] = mapped_column(Integer)
+    review_note: Mapped[str | None] = mapped_column(Text)            # why the last review was rejected
+    submitted_by: Mapped[str | None] = mapped_column(String(200))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class GlossaryTerm(Base):
     __tablename__ = "glossary_term"
+    __table_args__ = (Index("uq_glossary_term_live", "term", unique=True,
+                            postgresql_where=text("draft_of_id IS NULL"), sqlite_where=text("draft_of_id IS NULL")),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    term: Mapped[str] = mapped_column(String(200), unique=True)
+    term: Mapped[str] = mapped_column(String(200))
     term_ar: Mapped[str | None] = mapped_column(String(200))
     definition: Mapped[str] = mapped_column(Text)
     definition_ar: Mapped[str | None] = mapped_column(Text)
@@ -185,6 +194,12 @@ class GlossaryTerm(Base):
     synonyms_ar: Mapped[list] = mapped_column(JSON, default=list)
     # Links as strings: "table:schema.name", "column:schema.name.col", "metric:name"
     links: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="draft")      # draft | review | published
+    # review flow: a copy (draft_of_id set) holds edits to a published item until a reviewer approves them
+    draft_of_id: Mapped[int | None] = mapped_column(Integer)
+    review_note: Mapped[str | None] = mapped_column(Text)            # why the last review was rejected
+    submitted_by: Mapped[str | None] = mapped_column(String(200))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SampleQuery(Base):
@@ -339,9 +354,11 @@ class Dimension(Base):
     """A business concept agents can break answers down by (e.g. person_category), independent of any one table."""
 
     __tablename__ = "dimension"
+    __table_args__ = (Index("uq_dimension_key_live", "key", unique=True,
+                            postgresql_where=text("draft_of_id IS NULL"), sqlite_where=text("draft_of_id IS NULL")),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    key: Mapped[str] = mapped_column(String(64), unique=True)       # immutable slug other rules refer to
+    key: Mapped[str] = mapped_column(String(64))       # immutable slug other rules refer to
     label: Mapped[str | None] = mapped_column(String(200))
     label_ar: Mapped[str | None] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(Text)           # "what it means": read by the agent's planner
@@ -354,7 +371,12 @@ class Dimension(Base):
     applies_to: Mapped[list] = mapped_column(JSON, default=list)
     applies_note: Mapped[str | None] = mapped_column(Text)
     applies_note_ar: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | published (agents see published only)
+    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | review | published (agents see published only)
+    # review flow: a copy (draft_of_id set) holds edits to a published item until a reviewer approves them
+    draft_of_id: Mapped[int | None] = mapped_column(Integer)
+    review_note: Mapped[str | None] = mapped_column(Text)            # why the last review was rejected
+    submitted_by: Mapped[str | None] = mapped_column(String(200))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
@@ -379,10 +401,10 @@ class DimensionValue(Base):
 
 
 class DimensionBinding(Base):
-    """A physical column that holds this dimension's values. A column belongs to at most one dimension."""
+    """A physical column that holds this dimension's values. A column belongs to at most one dimension
+    (a draft copy repeats its live dimension's bindings, so that rule is checked in code, not by the database)."""
 
     __tablename__ = "dimension_binding"
-    __table_args__ = (UniqueConstraint("column_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     dimension_id: Mapped[int] = mapped_column(ForeignKey("dimension.id"))

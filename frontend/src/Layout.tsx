@@ -46,6 +46,7 @@ export default function Layout() {
   const tree = useQuery({ queryKey: ["tree"], queryFn: () => api<any[]>("/api/catalog/tree") });
   const stats = useQuery({ queryKey: ["stats"], queryFn: () => api<any>("/api/catalog/stats") });
   const dimensions = useQuery({ queryKey: ["dimensions", ""], queryFn: () => api<any[]>("/api/dimensions?q=") });
+  const reviewQ = useQuery({ queryKey: ["review"], queryFn: () => api<any>("/api/review") });
   const t = stats.data?.totals;
 
   const needle = q.trim().toLowerCase();
@@ -107,7 +108,7 @@ export default function Layout() {
             <NavLink className="nav-link" to="/" end><LayoutDashboard className="ic" />Overview</NavLink>
             <Link className={`nav-link${onCatalog && !sp.get("source_id") && !sp.get("needs_review") ? " active" : ""}`} to="/catalog"><Table2 className="ic" />All tables <span className="count-pill">{t?.tables ?? 0}</span></Link>
             <Link className={`nav-link${sp.get("needs_review") ? " active" : ""}`} to="/catalog?needs_review=true"><ClipboardCheck className="ic" />Review queue <span className="count-pill">{t?.review ?? 0}</span></Link>
-            <NavLink className="nav-link" to="/changes"><GitPullRequestDraft className="ic" />Pending changes <span className="count-pill">{t?.pending ?? 0}</span></NavLink>
+            <NavLink className="nav-link" to="/changes"><GitPullRequestDraft className="ic" />Pending changes <span className="count-pill">{(t?.pending ?? 0) + (reviewQ.data?.total ?? 0)}</span></NavLink>
             <NavLink className="nav-link" to="/quarantine"><EyeOff className="ic" />Quarantine <span className="count-pill">{t?.quarantined_columns ?? 0}</span></NavLink>
             <NavLink className="nav-link" to="/dimensions"><Shapes className="ic" />Dimensions <span className="count-pill">{dimensions.data?.length ?? 0}</span></NavLink>
             <NavLink className="nav-link" to="/columns"><BookOpen className="ic" />Column dictionary</NavLink>

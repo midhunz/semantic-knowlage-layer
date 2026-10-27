@@ -67,7 +67,10 @@ export default function Dimensions() {
                   {d.label_ar && <span className="ar-text" dir="rtl" style={{ marginLeft: 8, color: "var(--ink-2)" }}>{d.label_ar}</span>}
                   <div className="sub" style={{ fontFamily: "var(--mono)" }}>{d.key}</div>
                 </td>
-                <td><StatusChip status={d.status} /></td>
+                <td>
+                  <StatusChip status={d.status} />
+                  {d.draft_id && <Link className="chip info" style={{ marginInlineStart: 6 }} to={`/dimensions/${d.draft_id}`}>edit {d.draft_status}</Link>}
+                </td>
                 <td className="num">{d.values}{d.families > 0 && <span className="sub"> · {d.families} {d.families === 1 ? "family" : "families"}</span>}</td>
                 <td className="num">{d.bindings || <span className="muted">—</span>}</td>
                 <td>{d.applies ? <span className="chip gold-soft with-ic"><Users className="ic" />restricted</span> : <span className="muted">everyone</span>}</td>

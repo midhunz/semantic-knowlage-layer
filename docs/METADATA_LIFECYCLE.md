@@ -53,6 +53,16 @@ Every published version stores a full snapshot. **History** tab: see what each v
 * **Require a second person to approve changes** — the publisher may not be one of the editors (turn on only with ≥ 2 stewards).
 * **Publishing rules** — *review before publishing* and *minimum documentation %* apply to a table's first publication **and** to the result of every revision.
 
+## 6. Dimensions, metrics and glossary terms
+
+These follow one simple flow: **draft → review → published**.
+
+* Anything created starts as a **draft**. The author **submits** it; a reviewer **approves** (it goes live) or **rejects** it (back to draft, with a note).
+* A live item is never edited in place. *Edit as draft* creates one **draft copy**; agents keep reading the live version while the copy is drafted and reviewed. Approving copies it over the live item (a `dimension.updated` / `metric.updated` / `glossary.updated` webhook fires and the audit log records the approver); rejecting returns it to draft; *Discard* deletes it. Editing an item that is in review sends it back to draft.
+* Unpublishing is immediate (taking something away from agents needs no review).
+* **Pending changes** page → *Awaiting review* lists everything submitted, with the diff against the live version. "Require a second person to approve" (Settings) applies here too.
+* A dimension's draft copy carries its values and linked columns; a column can still belong to only one live dimension.
+
 ## What is not staged (yet)
 
-Metrics, glossary terms, schema descriptions, relationships and **dimensions** are still edited live (dimensions are audited and fire a `dimension.updated` webhook). Technical changes made by sync are not versioned, and sync does not write audit rows.
+Schema descriptions, relationships and sample queries are still edited live. Technical changes made by sync are not versioned, and sync does not write audit rows.

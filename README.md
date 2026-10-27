@@ -24,7 +24,7 @@ cd frontend && npm install && npm run dev                 # http://localhost:517
 ## Workflow
 1. **Sources** – add a Trino source (catalog `lake`) and click *Sync metadata*. Re-sync never overwrites curated fields; new or changed tables/columns land in the **review queue**.
 2. **Tables** – open a table: set type (fact/dimension/…), grain, description, caveats; per column set description, role (measure/dimension/time/identifier), semantic type, default aggregation, synonyms, allowed values, PK/PII flags.
-3. **Metrics / Glossary** – define governed business metrics (SQL expression) and terms with synonyms.
+3. **Metrics / Glossary / Dimensions** – define governed business metrics (SQL expression), terms with synonyms and dimensions. Everything new or edited is a **draft**; submit it, and a reviewer approves or rejects it (Pending changes → Awaiting review). Agents only see approved content ([docs/METADATA_LIFECYCLE.md](docs/METADATA_LIFECYCLE.md)).
 4. **Publish** a table. Only `published` content (and non-PII example values) is visible to agents.
 
 ## Working at scale (hundreds of tables, several sources)

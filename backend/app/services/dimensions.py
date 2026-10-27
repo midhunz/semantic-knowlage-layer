@@ -49,6 +49,12 @@ def label_of(v, lang: str) -> str | None:
     return v.label
 
 
+def universe(session: Session, dim: Dimension) -> list[Dimension]:
+    """The dimensions `dim` is judged against: every live one (not draft copies), with `dim` itself in its own place."""
+    live = session.scalars(select(Dimension).where(Dimension.draft_of_id.is_(None), Dimension.key != dim.key)).all()
+    return [*live, dim]
+
+
 # --------------------------------------------------------------------------- validation
 def check(session: Session, dim: Dimension) -> list[dict]:
     """Everything wrong or doubtful about a dimension. `error` blocks saving/publishing; `warning` is advice."""
@@ -76,8 +82,7 @@ def check(session: Session, dim: Dimension) -> list[dict]:
                 add("error", "family_unknown_value",
                     f"The family “{term}” uses “{v}”, which is not a value of {dim.key}", term=term, value=v)
 
-    others = {d.key: d for d in session.scalars(select(Dimension))}
-    others[dim.key] = dim
+    others = {d.key: d for d in universe(session, dim)}
     for c in dim.applies_to or []:
         ref = others.get(c.get("dimension"))
         if ref is None:
@@ -128,7 +133,7 @@ def value_dependents(session: Session, dim: Dimension, value: str) -> dict:
     v = next((x for x in dim.values if x.value == value), None)
     fam = [f.get("term") for f in dim.families or [] if value in (f.get("values") or [])]
     applies = []
-    for d in session.scalars(select(Dimension)):
+    for d in universe(session, dim):
         if any(c.get("dimension") == dim.key and value in (c.get("values") or []) for c in d.applies_to or []):
             applies.append({"dimension": d.key, "own": d.id == dim.id})
     return {"aliases": len(v.aliases or []) if v else 0, "families": fam, "applies_to": applies}
@@ -139,7 +144,7 @@ def applies_doc(session: Session, dim: Dimension, lang: str = "en") -> dict:
     conds = dim.applies_to or []
     if not conds:
         return {"everyone": True}
-    by_key = {d.key: d for d in session.scalars(select(Dimension))}
+    by_key = {d.key: d for d in universe(session, dim)}
     parts_en, parts_ar, structured = [], [], []
     for c in conds:
         ref = by_key.get(c.get("dimension"))
@@ -173,7 +178,7 @@ def live_bound_columns(dim: Dimension) -> list[Column]:
 
 def visible_dimensions(session: Session, domains: list | None) -> list[Dimension]:
     """Published dimensions; a domain-restricted key only gets those bound to a column in its domains."""
-    dims = session.scalars(select(Dimension).where(Dimension.status == "published").order_by(Dimension.key)).all()
+    dims = session.scalars(select(Dimension).where(Dimension.status == "published", Dimension.draft_of_id.is_(None)).order_by(Dimension.key)).all()
     if domains is None:
         return list(dims)
     return [d for d in dims if any(c.table.domain in domains for c in live_bound_columns(d))]

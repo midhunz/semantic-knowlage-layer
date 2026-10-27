@@ -975,3 +975,7 @@ table.ov-table td{ vertical-align:middle; padding-block:9px; }
 .mcp-notes code{ font-family:var(--mono); font-size:12px; background:var(--bg); padding:0 4px; border-radius:4px; }
 
 .switch{ display:inline-block; vertical-align:middle; }
+
+/* review bar: status notes and the submit / approve / reject buttons for dimensions, metrics, glossary */
+.review-bar{ display:flex; flex-direction:column; gap:8px; margin:10px 0; }
+.review-bar .d-actions{ margin-left:0; flex-wrap:wrap; }

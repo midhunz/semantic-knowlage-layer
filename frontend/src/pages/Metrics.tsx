@@ -2,13 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api, send } from "../api";
-import { ArrowDown, ArrowUp, Copy as CopyIcon, Eye, EyeOff, Gauge, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy as CopyIcon, Eye, EyeOff, Gauge, Pencil, Plus, Send, Trash2 } from "lucide-react";
 import { useAuth } from "../auth";
 import { Bi, CopyButton, EmptyState, Modal, Pager, SearchInput, Select, SkeletonRows, StatusChip, Tags, Text, ValueChips, useDebounced, useLang, useTitle, useToast, InfoTip } from "../ui";
 import { HELP } from "../help";
+import { ReviewBar } from "../review";
 
 const PAGE_SIZE = 25;
-const STATUSES = ["draft", "reviewed", "published"];
 
 type Form = {
   name: string; name_ar: string; description: string; description_ar: string; sql_expression: string; filters: string;
@@ -35,7 +35,7 @@ const QUICK = [
   { key: "all", label: "All" },
   { key: "published", label: "Published" },
   { key: "draft", label: "Drafts" },
-  { key: "reviewed", label: "Reviewed" },
+  { key: "review", label: "In review" },
   { key: "no_table", label: "No base table" },
   { key: "no_ar", label: "Missing Arabic" },
 ] as const;
@@ -81,7 +81,7 @@ export default function Metrics() {
     all: all.length,
     published: all.filter((m) => m.status === "published").length,
     draft: all.filter((m) => m.status === "draft").length,
-    reviewed: all.filter((m) => m.status === "reviewed").length,
+    review: all.filter((m) => m.status === "review").length,
     no_table: all.filter((m) => !m.base_table_id).length,
     no_ar: all.filter((m) => !hasAr(m)).length,
   }), [all]);
@@ -91,7 +91,7 @@ export default function Metrics() {
   const rows = useMemo(() => {
     const needle = norm((sp.get("q") ?? "").trim());
     const out = all.filter((m) => {
-      if (quick === "published" || quick === "draft" || quick === "reviewed") { if (m.status !== quick) return false; }
+      if (quick === "published" || quick === "draft" || quick === "review") { if (m.status !== quick) return false; }
       if (quick === "no_table" && m.base_table_id) return false;
       if (quick === "no_ar" && hasAr(m)) return false;
       if (tableF && String(m.base_table_id) !== tableF) return false;
@@ -120,9 +120,18 @@ export default function Metrics() {
     onSuccess: (_r, ids) => { refresh(); setSel(new Set()); toast(ids.length === 1 ? "Metric deleted" : `${ids.length} metrics deleted`); },
     onError: (e) => toast(String((e as Error).message ?? e), true),
   });
+  // bulk review actions: "submit" (drafts → review) and "unpublish" (live → draft); items in the wrong state are skipped
   const setStatus = useMutation({
-    mutationFn: ({ ids, status }: { ids: number[]; status: string }) => Promise.all(ids.map((id) => send("PUT", `/api/metrics/${id}`, toBody({ ...toForm(all.find((m) => m.id === id)), status })))),
-    onSuccess: (_r, v) => { refresh(); setSel(new Set()); toast(`${v.ids.length} ${v.ids.length === 1 ? "metric" : "metrics"} → ${v.status}`); },
+    mutationFn: async ({ ids, action }: { ids: number[]; action: "submit" | "unpublish" }) => {
+      const want = action === "submit" ? "draft" : "published";
+      const todo = ids.filter((id) => all.find((m) => m.id === id)?.status === want);
+      const res = await Promise.allSettled(todo.map((id) => send("POST", `/api/review/metric/${id}/${action}`)));
+      return { done: res.filter((r) => r.status === "fulfilled").length, skipped: ids.length - todo.length, failed: res.filter((r) => r.status === "rejected").length };
+    },
+    onSuccess: (r, v) => {
+      ["metrics", "review"].forEach((k) => qc.invalidateQueries({ queryKey: [k] })); setSel(new Set());
+      toast(`${r.done} ${v.action === "submit" ? "submitted for review" : "withdrawn"}${r.skipped ? ` · ${r.skipped} skipped (wrong state)` : ""}${r.failed ? ` · ${r.failed} failed` : ""}`, r.failed > 0);
+    },
     onError: (e) => toast(String((e as Error).message ?? e), true),
   });
   const confirmDelete = (ms: any[]) => {
@@ -139,7 +148,9 @@ export default function Metrics() {
 
   const openEditor = (id: number) => set({ open: String(id), new: null, from: null });
   const closeEditor = () => set({ open: null, new: null, from: null });
-  const editing = openId ? all.find((m) => String(m.id) === openId) : null;
+  const listed = openId ? all.find((m) => String(m.id) === openId) : null;
+  const copyQ = useQuery({ queryKey: ["metric", openId], enabled: !!openId && !listed && metrics.isSuccess, queryFn: () => api<any>(`/api/metrics/${openId}`), retry: false });
+  const editing = listed ?? copyQ.data ?? null;
   const source = fromId ? all.find((m) => String(m.id) === fromId) : null;
   const filtered = quick !== "all" || tableF || ownerF || (sp.get("q") ?? "");
   const clearFilters = () => { setQText(""); set({ show: null, table: null, owner: null, q: null }); };
@@ -199,7 +210,10 @@ export default function Metrics() {
                 </td>
                 <td className="mt-sql"><code title={m.sql_expression + (m.filters ? `  WHERE ${m.filters}` : "")}>{m.sql_expression}</code>{m.filters && <div className="sub mt-clip" title={m.filters}>where {m.filters}</div>}</td>
                 <td>{m.base_table_id ? <span className="mt-clip" title={tableFqnById.get(m.base_table_id)}>{tableFqnById.get(m.base_table_id) ?? `table #${m.base_table_id}`}</span> : <span className="chip warn">none</span>}</td>
-                <td><StatusChip status={m.status} /></td>
+                <td>
+                  <StatusChip status={m.status} />
+                  {m.draft_id && <button type="button" className="chip info linklike" style={{ marginInlineStart: 6 }} onClick={() => openEditor(m.draft_id)}>edit {m.draft_status}</button>}
+                </td>
                 <td><span className="lang-cell"><span className={`lang-dot en${m.description ? " on" : ""}`} title={m.description ? "English definition written" : "English definition missing"} /><span className={`lang-dot ar${hasAr(m) ? " on" : ""}`} title={hasAr(m) ? "Arabic name and definition written" : "Arabic name or definition missing"} /><span className="sr-only">{m.description ? "EN ok" : "EN missing"}, {hasAr(m) ? "AR ok" : "AR missing"}</span></span></td>
                 <td className="mt-actions">
                   <button className="btn" onClick={() => openEditor(m.id)}>{canEdit ? <><Pencil className="ic" />Edit</> : <><Eye className="ic" />View</>}</button>
@@ -229,18 +243,18 @@ export default function Metrics() {
           <b>{sel.size.toLocaleString()} selected</b>
           <button className="linklike-w" onClick={() => setSel(new Set())}>Clear</button>
           <span style={{ flex: 1 }} />
-          <button className="btn" disabled={setStatus.isPending} onClick={() => setStatus.mutate({ ids: [...sel], status: "published" })}><Eye className="ic" />Publish</button>
-          <button className="btn" disabled={setStatus.isPending} onClick={() => setStatus.mutate({ ids: [...sel], status: "draft" })}><EyeOff className="ic" />Move to draft</button>
+          <button className="btn" disabled={setStatus.isPending} onClick={() => setStatus.mutate({ ids: [...sel], action: "submit" })}><Send className="ic" />Submit for review</button>
+          <button className="btn" disabled={setStatus.isPending} onClick={() => setStatus.mutate({ ids: [...sel], action: "unpublish" })}><EyeOff className="ic" />Unpublish</button>
           <button className="btn" disabled={del.isPending} onClick={() => confirmDelete(all.filter((m) => sel.has(m.id)))}><Trash2 className="ic" />Delete</button>
         </div>
       )}
 
       {(editing || creating) && (
         <MetricEditor key={editing?.id ?? `new-${fromId ?? ""}`} metric={editing ?? null} source={source ?? null} all={all} tableFqnById={tableFqnById}
-          tables={tablesQ.data ?? []} dimKeys={dimKeys} canEdit={canEdit} onClose={closeEditor}
+          tables={tablesQ.data ?? []} dimKeys={dimKeys} canEdit={canEdit && editing?.status !== "published"} mayEdit={canEdit} onOpen={openEditor} onClose={closeEditor}
           onSaved={(msg) => { refresh(); toast(msg); closeEditor(); }} />
       )}
-      {openId && metrics.data && !editing && <MissingMetric onClose={closeEditor} />}
+      {openId && metrics.data && !editing && !copyQ.isLoading && <MissingMetric onClose={closeEditor} />}
     </div>
   );
 }
@@ -251,8 +265,8 @@ function MissingMetric({ onClose }: { onClose: () => void }) {
 }
 
 /* ------------------------------------------------------------------ editor */
-function MetricEditor({ metric, source, all, tables, tableFqnById, dimKeys, canEdit, onClose, onSaved }: {
-  metric: any | null; source: any | null; all: any[]; tables: any[]; tableFqnById: Map<number, string>; dimKeys: string[]; canEdit: boolean;
+function MetricEditor({ metric, source, all, tables, tableFqnById, dimKeys, canEdit, onOpen, onClose, onSaved }: {
+  metric: any | null; source: any | null; all: any[]; tables: any[]; tableFqnById: Map<number, string>; dimKeys: string[]; canEdit: boolean; mayEdit: boolean; onOpen: (id: number) => void;
   onClose: () => void; onSaved: (msg: string) => void;
 }) {
   const initial: Form = metric ? toForm(metric) : source ? { ...toForm(source), name: `${source.name} (copy)`, name_ar: source.name_ar ? `${source.name_ar} (نسخة)` : "", status: "draft" } : blank;
@@ -263,7 +277,7 @@ function MetricEditor({ metric, source, all, tables, tableFqnById, dimKeys, canE
   const { lang } = useLang();
 
   const tableIdByFqn = new Map(tables.map((t) => [t.fqn as string, t.id as number]));
-  const dupe = all.some((m) => m.id !== metric?.id && m.name.trim().toLowerCase() === f.name.trim().toLowerCase());
+  const dupe = all.some((m) => m.id !== metric?.id && m.id !== metric?.draft_of_id && m.name.trim().toLowerCase() === f.name.trim().toLowerCase());
   const problem = !f.name.trim() ? "Add a name" : dupe ? "Another metric already uses this name" : !f.sql_expression.trim() ? "Add the SQL expression" : "";
   const dimOptions = [...new Set([...dimKeys, ...f.allowed_dimensions])];
   const unknownDims = f.allowed_dimensions.filter((d) => !dimKeys.includes(d));
@@ -273,7 +287,7 @@ function MetricEditor({ metric, source, all, tables, tableFqnById, dimKeys, canE
   const close = () => { if (!dirty || window.confirm("Discard your unsaved changes to this metric?")) onClose(); };
   const save = useMutation({
     mutationFn: (status: string) => { const body = toBody({ ...f, status }); return metric ? send("PUT", `/api/metrics/${metric.id}`, body) : send("POST", "/api/metrics", body); },
-    onSuccess: (_r, status) => onSaved(metric ? `Saved “${f.name}”` : status === "published" ? `Published “${f.name}”` : `Created “${f.name}” as ${status}`),
+    onSuccess: () => onSaved(metric ? `Saved “${f.name}”` : `Created “${f.name}” as a draft`),
   });
 
   // Ctrl/Cmd+Enter saves
@@ -290,17 +304,15 @@ function MetricEditor({ metric, source, all, tables, tableFqnById, dimKeys, canE
       <button className="btn" onClick={close}>{canEdit ? "Cancel" : "Close"}</button>
       {canEdit && (metric
         ? <button className="btn primary" disabled={!!problem || !dirty || save.isPending} onClick={() => save.mutate(f.status)}>{save.isPending ? "Saving…" : "Save changes"}</button>
-        : <>
-            <button className="btn" disabled={!!problem || save.isPending} onClick={() => save.mutate("draft")}>Save as draft</button>
-            <button className="btn primary" disabled={!!problem || save.isPending} onClick={() => save.mutate("published")}>Save & publish</button>
-          </>)}
+        : <button className="btn primary" disabled={!!problem || save.isPending} onClick={() => save.mutate("draft")}>Create draft</button>)}
     </>
   );
 
   return (
     <Modal width={900} title={metric ? (canEdit ? "Edit metric" : "Metric") : source ? "Duplicate metric" : "New metric"}
-      sub={metric ? metric.name : source ? `Copy of ${source.name} — saved as a draft until you publish` : "Saved as a draft unless you publish it"} onClose={close} footer={footer}>
+      sub={metric ? metric.name : source ? `Copy of ${source.name} — saved as a draft` : "Saved as a draft; a reviewer approves it before agents see it"} onClose={close} footer={footer}>
       <div className="mt-form">
+        {metric && <ReviewBar kind="metric" item={metric} name={metric.name} onOpen={onOpen} onGone={() => onOpen(metric.draft_of_id)} />}
         <section>
           <h4>What it means</h4>
           <Bi label="Name" en={f.name} ar={f.name_ar} onEn={(v) => up({ name: v })} onAr={(v) => up({ name_ar: v })} />
@@ -342,9 +354,9 @@ function MetricEditor({ metric, source, all, tables, tableFqnById, dimKeys, canE
           <h4>Ownership</h4>
           <div className="two-col">
             <Text label="Owner" value={f.owner} onSave={(v) => up({ owner: v })} placeholder="Person or team accountable for this number" />
-            <Select label="Status" value={f.status} options={STATUSES} onSave={(v) => up({ status: v })} />
+            <div className="field"><label>Status</label><div><StatusChip status={metric?.status ?? "draft"} /></div></div>
           </div>
-          <div className="hint">Only <b>published</b> metrics are visible to agents. Drafts and reviewed metrics stay private.</div>
+          <div className="hint">Only <b>published</b> metrics are visible to agents. A draft is submitted for review, and a reviewer approves or rejects it.</div>
         </section>
         {save.error && <div className="banner bad" role="alert">{String((save.error as Error).message ?? save.error)}</div>}
       </div>

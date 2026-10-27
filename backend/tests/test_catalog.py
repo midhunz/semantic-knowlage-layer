@@ -1,5 +1,5 @@
 import pytest
-from conftest import fresh_engine  # noqa: E402
+from conftest import fresh_engine, go_live  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app.db as db  # noqa: E402
@@ -65,7 +65,9 @@ def test_publish_flow_and_agent_context_hides_unpublished_and_pii():
     client.patch(f"/api/columns/{order['id']}", json={"pii": True, "example_values": ["secret"]})
     client.patch(f"/api/tables/{tid}", json={"grain": "one row per order", "table_type": "fact",
                                              "status": "published"})
-    client.post("/api/glossary", json={"term": "Revenue", "definition": "Net sales", "synonyms": ["sales"]})
+    term = client.post("/api/glossary", json={"term": "Revenue", "definition": "Net sales", "synonyms": ["sales"]}).json()
+    assert client.get("/agent/glossary/resolve", params={"term": "sales"}).json() == []      # a draft is not visible
+    go_live(client, "glossary", term["id"])
 
     ctx = client.get("/agent/tables/sales.fact_orders/context").text
     assert "one row per order" in ctx and "revenue" in ctx
